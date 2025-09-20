@@ -81,12 +81,6 @@ export const PurchaseModal: React.FC<PurchaseModalProps> = ({
                 </span>
               </div>
 
-              <div className="detail-row">
-                <span>IPFS Hash:</span>
-                <span className="address full-address">
-                  {product.ipfsHash}
-                </span>
-              </div>
             </div>
 
             <div className="ipfs-section">
@@ -146,12 +140,6 @@ export const PurchaseModal: React.FC<PurchaseModalProps> = ({
                 </div>
               )}
 
-              <div className="detail-row">
-                <span>IPFS Hash:</span>
-                <span className="address full-address">
-                  {product.ipfsHash}
-                </span>
-              </div>
 
               <div className="info-box">
                 <p>⚠️ 구매 프로세스</p>

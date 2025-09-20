@@ -390,6 +390,7 @@ function App() {
         isOpen={showProductModal}
         onClose={() => setShowProductModal(false)}
         onSubmit={handleProductSubmit}
+        loading={loading}
       />
 
       <PurchaseModal

@@ -5,9 +5,10 @@ interface ProductModalProps {
   isOpen: boolean
   onClose: () => void
   onSubmit: (product: Omit<Product, 'id' | 'created' | 'seller'>) => void
+  loading?: boolean
 }
 
-export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onSubmit }) => {
+export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onSubmit, loading = false }) => {
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -48,14 +49,20 @@ export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onS
   if (!isOpen) return null
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={loading ? undefined : onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>상품 등록</h2>
-          <button className="close-btn" onClick={onClose}>×</button>
+          <button className="close-btn" onClick={onClose} disabled={loading}>×</button>
         </div>
 
         <form onSubmit={handleSubmit}>
+          {loading && (
+            <div style={{ textAlign: 'center', padding: '20px', color: '#007bff' }}>
+              <div>NFT와 DID Credential을 생성하는 중입니다...</div>
+              <div style={{ marginTop: '10px' }}>잠시만 기다려주세요.</div>
+            </div>
+          )}
           <div className="form-group">
             <label htmlFor="name">상품명</label>
             <input
@@ -65,6 +72,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onS
               onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
               placeholder="상품명을 입력하세요"
               required
+              disabled={loading}
             />
           </div>
 
@@ -77,6 +85,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onS
               placeholder="상품에 대한 설명을 입력하세요"
               rows={4}
               required
+              disabled={loading}
             />
           </div>
 
@@ -89,6 +98,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onS
               onChange={(e) => setFormData(prev => ({ ...prev, ipfsHash: e.target.value }))}
               placeholder="QmXxx... (IPFS 해시)"
               required
+              disabled={loading}
             />
             <small>IPFS에 업로드된 파일의 해시값을 입력하세요</small>
           </div>
@@ -104,15 +114,16 @@ export const ProductModal: React.FC<ProductModalProps> = ({ isOpen, onClose, onS
               onChange={(e) => setFormData(prev => ({ ...prev, price: e.target.value }))}
               placeholder="10.0"
               required
+              disabled={loading}
             />
           </div>
 
           <div className="modal-footer">
-            <button type="button" className="btn-secondary" onClick={onClose}>
+            <button type="button" className="btn-secondary" onClick={onClose} disabled={loading}>
               취소
             </button>
-            <button type="submit" className="btn-primary">
-              상품 등록
+            <button type="submit" className="btn-primary" disabled={loading}>
+              {loading ? '등록 중...' : '상품 등록'}
             </button>
           </div>
         </form>
