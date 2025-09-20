@@ -38,7 +38,7 @@ coverage/
 
 # Documentation
 docs/
-*.md
+
 
 # MCP config
 .mcp.json
