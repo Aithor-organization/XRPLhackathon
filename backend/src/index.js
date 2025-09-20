@@ -6,16 +6,18 @@ const logger = require('./services/logger');
 const { errorHandler } = require('./middleware/errorHandler');
 const platformWallet = require('./services/xrpl/platformWallet');
 const xrplClient = require('./services/xrpl/client');
+const dbConnection = require('./db/connection');
 
 // Import API routes
 const authRoutes = require('./api/auth');
 const agentsRoutes = require('./api/agents');
-const licensesRoutes = require('./api/licenses');
+// const licensesRoutes = require('./api/licenses'); // Removed - using XRPL Credentials instead
 const purchaseRoutes = require('./api/purchase');
 const transactionsRoutes = require('./api/transactions');
 const usersRoutes = require('./api/users');
 const downloadsRoutes = require('./api/downloads');
 const reviewsRoutes = require('./api/reviews');
+const syncRoutes = require('./api/sync');
 
 // Load environment variables
 require('dotenv').config();
@@ -65,12 +67,13 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/agents', agentsRoutes);
-app.use('/api/licenses', licensesRoutes);
+// app.use('/api/licenses', licensesRoutes); // Removed - using XRPL Credentials instead
 app.use('/api/purchase', purchaseRoutes);
 app.use('/api/transactions', transactionsRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/downloads', downloadsRoutes);
 app.use('/api/reviews', reviewsRoutes);
+app.use('/api/sync', syncRoutes);
 
 // Static files for uploaded content (if needed)
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
@@ -93,6 +96,11 @@ app.use(errorHandler);
 async function startServer() {
     try {
         logger.info('Starting AgentTrust backend server...');
+
+        // Initialize database connection
+        logger.info('Connecting to database...');
+        await dbConnection.connect();
+        logger.info('✅ Connected to SQLite database');
 
         // Initialize XRPL client
         logger.info('Connecting to XRPL...');

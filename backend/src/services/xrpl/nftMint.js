@@ -20,11 +20,14 @@ class NFTMintingService {
         return `agent_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     }
 
-    // Generate credential type for the agent
-    generateCredentialType(agentId) {
+    // Extract credential type from NFT metadata (used during purchase)
+    extractCredentialTypeFromNFT(nftMetadata) {
         // Format: ML_{first_12_chars_of_agent_id}
-        const shortId = agentId.substring(0, 12);
-        return `ML_${shortId}`;
+        if (nftMetadata && nftMetadata.agent_id) {
+            const shortId = nftMetadata.agent_id.substring(0, 12);
+            return `ML_${shortId}`;
+        }
+        throw new ValidationError('Cannot extract credential type: invalid NFT metadata');
     }
 
     // Create DID document for the AI agent
@@ -69,12 +72,12 @@ class NFTMintingService {
     encodeNFTMetadata(agentData) {
         try {
             // Create metadata that does NOT include IPFS hash for security
+            // credential_type will be generated from agent_id during purchase
             const metadata = {
                 name: agentData.name,
                 description: agentData.description,
                 category: agentData.category,
                 agent_id: agentData.agentId,
-                credential_type: agentData.credentialType,
                 platform: config.platform.name,
                 version: "1.0.0",
                 created_at: new Date().toISOString()
@@ -100,14 +103,14 @@ class NFTMintingService {
     // Create NFTokenMint transaction
     async createNFTMintTransaction(ownerWallet, agentData) {
         try {
-            // Generate transfer fee (0.1% = 100 in basis points, max 50% = 50000)
-            const transferFee = 100; // 0.1% transfer fee
+            // 30% platform fee as requested (30000 basis points = 30%)
+            const transferFee = 30000; // 30% transfer fee
 
             // Create flags for NFT
             const flags = {
                 tfBurnable: false,      // NFT cannot be burned
                 tfOnlyXRP: true,        // Only XRP payments
-                tfTransferable: false   // NFT cannot be transferred (non-transferable)
+                tfTransferable: false   // NFT cannot be transferred (ownership retained)
             };
 
             // Calculate numeric flags value
@@ -148,26 +151,55 @@ class NFTMintingService {
     }
 
     // Submit NFT minting transaction
-    async submitNFTMintTransaction(ownerWallet, transaction) {
+    async submitNFTMintTransaction(signedTransaction) {
         try {
-            // Create wallet instance for signing (in real app, this would be done client-side)
-            // For now, we'll prepare the transaction and return it for client-side signing
-
             const client = xrplClient.getClient();
 
-            // Note: In a real implementation, the transaction would be signed
-            // client-side by the user's wallet, not server-side
+            // Submit the signed transaction to XRPL
+            const result = await client.submitAndWait(signedTransaction);
+
+            // Check if successful
+            if (result.result.meta.TransactionResult !== 'tesSUCCESS') {
+                throw new XRPLError(`NFT minting failed: ${result.result.meta.TransactionResult}`);
+            }
+
+            // Extract NFToken ID from transaction metadata
+            const meta = result.result.meta;
+            let tokenId = null;
+
+            // Find the minted NFToken ID
+            if (meta && typeof meta === 'object') {
+                const affectedNodes = meta.AffectedNodes || [];
+                for (const node of affectedNodes) {
+                    if (node.CreatedNode && node.CreatedNode.LedgerEntryType === 'NFTokenPage') {
+                        const nftokens = node.CreatedNode.NewFields?.NFTokens ||
+                                       node.ModifiedNode?.FinalFields?.NFTokens || [];
+                        if (nftokens.length > 0) {
+                            tokenId = nftokens[nftokens.length - 1].NFToken.NFTokenID;
+                            break;
+                        }
+                    } else if (node.ModifiedNode && node.ModifiedNode.LedgerEntryType === 'NFTokenPage') {
+                        const prevTokens = node.ModifiedNode.PreviousFields?.NFTokens || [];
+                        const finalTokens = node.ModifiedNode.FinalFields?.NFTokens || [];
+                        if (finalTokens.length > prevTokens.length) {
+                            tokenId = finalTokens[finalTokens.length - 1].NFToken.NFTokenID;
+                            break;
+                        }
+                    }
+                }
+            }
 
             logger.logTransaction('nft_mint_submitted', {
-                owner: ownerWallet,
-                transactionType: transaction.TransactionType
+                transactionHash: result.result.hash,
+                tokenId: tokenId,
+                result: result.result.meta.TransactionResult
             });
 
-            // Return prepared transaction for client-side signing
             return {
                 success: true,
-                transaction: transaction,
-                message: 'Transaction prepared for client-side signing'
+                transactionHash: result.result.hash,
+                tokenId: tokenId || result.result.hash,
+                ledgerIndex: result.result.ledger_index
             };
 
         } catch (error) {
@@ -233,13 +265,12 @@ class NFTMintingService {
 
             // Generate unique IDs
             const agentId = this.generateAgentId();
-            const credentialType = this.generateCredentialType(agentId);
+            // credential_type will be derived from agent_id during purchase
 
             // Prepare agent data
             const completeAgentData = {
                 ...agentData,
-                agentId: agentId,
-                credentialType: credentialType
+                agentId: agentId
             };
 
             // Create DID document
@@ -253,14 +284,12 @@ class NFTMintingService {
 
             logger.logTransaction('agent_nft_mint_initiated', {
                 agentId: agentId,
-                owner: agentData.ownerWallet,
-                credentialType: credentialType
+                owner: agentData.ownerWallet
             });
 
             return {
                 success: true,
                 agentId: agentId,
-                credentialType: credentialType,
                 didDocument: didDocument,
                 mintTransaction: mintTransaction,
                 message: 'NFT minting transaction prepared. Submit via XRPL client.'
@@ -356,6 +385,214 @@ class NFTMintingService {
         } catch (error) {
             logger.logError(error, { context: 'getNFTMetadata' });
             throw new XRPLError('Failed to get NFT metadata', error);
+        }
+    }
+
+    // ============ REP TOKEN FUNCTIONALITY ============
+
+    // Create REP Token Mint Transaction
+    async createREPTokenMintTransaction(userWallet, repAmount, reviewData) {
+        try {
+            // REP tokens are minted as NFTs with metadata containing reputation value AND review content
+            const repMetadata = {
+                type: 'REP_TOKEN',
+                amount: repAmount,
+                issuer: config.platform.walletAddress,
+                recipient: userWallet,
+                reason: reviewData.type, // 'helpful_vote' only
+                relatedAgent: reviewData.agentId,
+                // 리뷰 정보 포함
+                review: {
+                    reviewId: reviewData.reviewId,
+                    content: reviewData.reviewContent,
+                    rating: reviewData.rating,
+                    reviewer: reviewData.reviewerWallet,
+                    createdAt: reviewData.reviewCreatedAt
+                },
+                timestamp: new Date().toISOString(),
+                platform: config.platform.name
+            };
+
+            // Convert to hex
+            const jsonString = JSON.stringify(repMetadata);
+            const hexMetadata = Buffer.from(jsonString, 'utf8').toString('hex').toUpperCase();
+
+            // Create REP token as NFT
+            const repTokenTx = {
+                TransactionType: 'NFTokenMint',
+                Account: config.platform.walletAddress, // Platform mints REP tokens
+                NFTokenTaxon: 1, // Taxon 1 for REP tokens (0 is for agent NFTs)
+                TransferFee: 0, // No transfer fee for REP tokens
+                Flags: 0x00000008, // Transferable - users can trade REP tokens
+                URI: hexMetadata
+            };
+
+            // Auto-fill transaction
+            const client = xrplClient.getClient();
+            const prepared = await client.autofill(repTokenTx);
+
+            logger.logTransaction('rep_token_mint_prepared', {
+                recipient: userWallet,
+                amount: repAmount,
+                reason: reviewData.type
+            });
+
+            return prepared;
+
+        } catch (error) {
+            logger.logError(error, { context: 'createREPTokenMintTransaction' });
+            throw new XRPLError('Failed to create REP token minting transaction', error);
+        }
+    }
+
+    // Submit REP Token Minting
+    async submitREPTokenMint(signedTransaction) {
+        try {
+            const client = xrplClient.getClient();
+
+            // Submit the signed REP token transaction
+            const result = await client.submitAndWait(signedTransaction);
+
+            if (result.result.meta.TransactionResult !== 'tesSUCCESS') {
+                throw new XRPLError(`REP token minting failed: ${result.result.meta.TransactionResult}`);
+            }
+
+            // Extract REP token ID
+            const meta = result.result.meta;
+            let repTokenId = null;
+
+            if (meta && typeof meta === 'object') {
+                const affectedNodes = meta.AffectedNodes || [];
+                for (const node of affectedNodes) {
+                    if (node.CreatedNode && node.CreatedNode.LedgerEntryType === 'NFTokenPage') {
+                        const nftokens = node.CreatedNode.NewFields?.NFTokens || [];
+                        if (nftokens.length > 0) {
+                            repTokenId = nftokens[nftokens.length - 1].NFToken.NFTokenID;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            logger.logTransaction('rep_token_minted', {
+                transactionHash: result.result.hash,
+                repTokenId: repTokenId
+            });
+
+            return {
+                success: true,
+                repTokenId: repTokenId,
+                transactionHash: result.result.hash
+            };
+
+        } catch (error) {
+            logger.logError(error, { context: 'submitREPTokenMint' });
+            throw new XRPLError('Failed to submit REP token minting', error);
+        }
+    }
+
+    // Mint REP tokens for user actions
+    async mintREPTokensForUser(userWallet, action, actionData) {
+        try {
+            let repAmount = 0;
+            let reviewData = {
+                type: action,
+                agentId: actionData.agentId || null,
+                // 리뷰 정보 추가 (투표 시에만)
+                reviewId: actionData.reviewId || null,
+                reviewContent: actionData.reviewContent || null,
+                rating: actionData.rating || null,
+                reviewerWallet: actionData.reviewerWallet || null,
+                reviewCreatedAt: actionData.reviewCreatedAt || null
+            };
+
+            // Determine REP amount based on action
+            switch(action) {
+                case 'helpful_vote':
+                    repAmount = 1; // 1 REP for voting helpful on a review
+                    // 리뷰 정보가 필수
+                    if (!actionData.reviewId || !actionData.reviewContent) {
+                        throw new ValidationError('Review data required for helpful vote');
+                    }
+                    break;
+                // 리뷰 작성은 토큰 발행 안 함
+                // case 'review_submitted':
+                //     repAmount = 0; // No REP for just submitting a review
+                //     break;
+                default:
+                    throw new ValidationError(`Unknown REP action: ${action}`);
+            }
+
+            // Create REP token mint transaction
+            const repTx = await this.createREPTokenMintTransaction(
+                userWallet,
+                repAmount,
+                reviewData
+            );
+
+            logger.info('REP token minting initiated', {
+                user: userWallet,
+                action: action,
+                amount: repAmount
+            });
+
+            return {
+                success: true,
+                transaction: repTx,
+                repAmount: repAmount,
+                action: action,
+                message: 'REP token transaction prepared for signing'
+            };
+
+        } catch (error) {
+            logger.logError(error, { context: 'mintREPTokensForUser' });
+            throw error;
+        }
+    }
+
+    // Get user's REP token balance
+    async getUserREPBalance(userWallet) {
+        try {
+            const client = xrplClient.getClient();
+
+            // Get all NFTs owned by the user
+            const response = await client.request({
+                command: 'account_nfts',
+                account: userWallet
+            });
+
+            const nfts = response.result.account_nfts || [];
+            let totalREP = 0;
+
+            // Filter and sum REP tokens
+            for (const nft of nfts) {
+                if (nft.NFTokenTaxon === 1) { // REP tokens have taxon 1
+                    try {
+                        // Decode metadata to get REP amount
+                        const hexURI = nft.URI;
+                        if (hexURI) {
+                            const jsonString = Buffer.from(hexURI, 'hex').toString('utf8');
+                            const metadata = JSON.parse(jsonString);
+                            if (metadata.type === 'REP_TOKEN') {
+                                totalREP += metadata.amount || 0;
+                            }
+                        }
+                    } catch (e) {
+                        // Skip invalid metadata
+                        continue;
+                    }
+                }
+            }
+
+            return {
+                success: true,
+                balance: totalREP,
+                wallet: userWallet
+            };
+
+        } catch (error) {
+            logger.logError(error, { context: 'getUserREPBalance' });
+            throw new XRPLError('Failed to get REP balance', error);
         }
     }
 }

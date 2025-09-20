@@ -389,8 +389,8 @@ class UserModel {
             const reviews = await dbConnection.query(
                 `SELECT AVG(rating) as avg_rating, COUNT(*) as review_count
                  FROM reviews r
-                 JOIN licenses l ON r.license_id = l.license_id
-                 WHERE l.seller_wallet = ?`,
+                 JOIN credential_purchases cp ON r.license_id = cp.credential_id
+                 WHERE cp.seller_wallet = ?`,
                 [walletAddress]
             );
 
@@ -449,16 +449,16 @@ class UserModel {
             );
 
             const purchaseCount = await dbConnection.get(
-                'SELECT COUNT(*) as count FROM licenses WHERE buyer_wallet = ? AND status = "active"',
+                'SELECT COUNT(*) as count FROM credential_purchases WHERE buyer_wallet = ? AND status = "active"',
                 [walletAddress]
             );
 
             const recentActivity = await dbConnection.query(
-                `SELECT 'sale' as type, created_at, agent_id as reference_id
-                 FROM licenses WHERE seller_wallet = ?
+                `SELECT 'sale' as type, purchased_at as created_at, agent_id as reference_id
+                 FROM credential_purchases WHERE seller_wallet = ?
                  UNION ALL
                  SELECT 'purchase' as type, purchased_at as created_at, agent_id as reference_id
-                 FROM licenses WHERE buyer_wallet = ?
+                 FROM credential_purchases WHERE buyer_wallet = ?
                  ORDER BY created_at DESC LIMIT 10`,
                 [walletAddress, walletAddress]
             );

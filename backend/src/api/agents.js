@@ -3,12 +3,16 @@ const router = express.Router();
 const aiAgentModel = require('../models/AIAgent');
 const walletAuthService = require('../services/auth/walletAuth');
 const nftMintingService = require('../services/xrpl/nftMint');
+const didService = require('../services/xrpl/did');
+const transactionModel = require('../models/Transaction');
+const config = require('../config');
 const logger = require('../services/logger');
 const {
     asyncHandler,
     ValidationError,
     NotFoundError,
-    ConflictError
+    ConflictError,
+    XRPLError
 } = require('../middleware/errorHandler');
 
 // GET /api/agents - List all AI agents
@@ -123,7 +127,32 @@ router.post('/', walletAuthService.authenticateMiddleware(), asyncHandler(async 
     // Mint NFT for the agent
     const mintResult = await nftMintingService.mintAgentNFT(agentData);
 
-    // Create agent in database with NFT and credential info
+    // Create DID for the agent (온체인 메타데이터 저장)
+    let didResult = null;
+    try {
+        didResult = await didService.createAgentDID({
+            agent_id: mintResult.agentId,
+            name: name,
+            description: description,
+            category: category,
+            version: '1.0.0',
+            ipfs_hash: ipfsHash,
+            nft_token_id: mintResult.mintTransaction.NFTokenID || 'pending_mint',
+            price_xrp: priceXRP
+        }, ownerWallet);
+
+        logger.info('DID created for agent', {
+            agentId: mintResult.agentId,
+            didId: didResult.didId,
+            owner: ownerWallet
+        });
+    } catch (didError) {
+        logger.logError(didError, { context: 'DID creation failed during agent registration' });
+        // DID 실패해도 Agent는 등록됨 (옵셔널 기능)
+    }
+
+    // Create agent in database for indexing/caching
+    // credential_type will be derived from agent_id in NFT metadata during purchase
     const agentToCreate = {
         nft_id: mintResult.mintTransaction.NFTokenID || 'pending_mint', // Will be updated after transaction confirmation
         wallet_address: ownerWallet,
@@ -133,24 +162,26 @@ router.post('/', walletAuthService.authenticateMiddleware(), asyncHandler(async 
         price_xrp: priceXRP,
         image_url: imageUrl || null,
         ipfs_hash: ipfsHash,
-        credential_type: mintResult.credentialType,
-        did_document: JSON.stringify(mintResult.didDocument),
-        status: 'pending' // Will be activated after NFT confirmation
+        credential_type: `AI_LICENSE_${mintResult.agentId.substring(0, 8)}`, // Store credential type
+        did_id: didResult ? didResult.didId : null, // Store DID ID (reference only)
+        did_document: null, // Don't cache - always read from blockchain
+        status: 'active' // Set as active immediately (will be verified during sync)
     };
 
     const createdAgent = await aiAgentModel.create(agentToCreate);
 
     logger.info('Agent registered successfully', {
-        agentId: createdAgent.agent_id,
-        owner: ownerWallet,
-        credentialType: mintResult.credentialType
+        agentId: mintResult.agentId,
+        owner: ownerWallet
     });
 
     res.status(201).json({
         success: true,
         agent: createdAgent,
         mintTransaction: mintResult.mintTransaction,
-        message: 'Agent registered. Submit the mint transaction to XRPL to complete the process.'
+        didTransaction: didResult ? didResult.transaction : null,
+        didId: didResult ? didResult.didId : null,
+        message: 'Agent registered. Submit the mint and DID transactions to XRPL to complete the process.'
     });
 }));
 
@@ -257,6 +288,37 @@ router.get('/:id', asyncHandler(async (req, res) => {
         throw new NotFoundError('Agent not found');
     }
 
+    // DID 검증 및 메타데이터 조회 (블록체인에서 직접)
+    let didInfo = null;
+    if (agentDetails.did_id) {
+        try {
+            didInfo = await didService.getAgentDID(agentDetails.did_id);
+            if (didInfo) {
+                // 블록체인에서 검증된 메타데이터 추가
+                agentDetails.verifiedMetadata = didService.extractAgentMetadata(didInfo.document);
+                agentDetails.didVerified = true;
+                agentDetails.didInfo = {
+                    didId: didInfo.didId,
+                    uri: didInfo.uri,
+                    verified: didInfo.verified
+                };
+
+                logger.info('DID verified for agent', {
+                    agentId: id,
+                    didId: didInfo.didId,
+                    verified: didInfo.verified
+                });
+            }
+        } catch (didError) {
+            logger.logError(didError, { context: 'DID verification failed during agent details' });
+            agentDetails.didVerified = false;
+            agentDetails.didError = 'DID verification failed';
+        }
+    } else {
+        agentDetails.didVerified = false;
+        agentDetails.didInfo = null;
+    }
+
     res.json({
         success: true,
         agent: agentDetails
@@ -310,11 +372,11 @@ router.put('/:id', walletAuthService.authenticateMiddleware(), asyncHandler(asyn
 // POST /api/agents/:id/mint/confirm - Confirm NFT minting
 router.post('/:id/mint/confirm', walletAuthService.authenticateMiddleware(), asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { transactionHash, nftId } = req.body;
+    const { signedTransaction } = req.body;
     const ownerWallet = req.user.walletAddress;
 
-    if (!transactionHash || !nftId) {
-        throw new ValidationError('Transaction hash and NFT ID are required');
+    if (!signedTransaction) {
+        throw new ValidationError('Signed transaction is required');
     }
 
     // Get agent to verify ownership
@@ -327,26 +389,47 @@ router.post('/:id/mint/confirm', walletAuthService.authenticateMiddleware(), asy
         throw new ValidationError('You can only confirm minting for your own agents');
     }
 
-    // Verify NFT from transaction (simplified for MVP)
-    // In production, this would verify the actual XRPL transaction
+    // Submit the signed NFT transaction to XRPL
+    const mintResult = await nftMintingService.submitNFTMintTransaction(signedTransaction);
+
+    if (!mintResult.success) {
+        throw new XRPLError('NFT minting failed on XRPL');
+    }
 
     // Update agent with confirmed NFT ID and activate it
     const updatedAgent = await aiAgentModel.update(id, {
-        nft_id: nftId,
+        nft_id: mintResult.tokenId,
         status: 'active'
+    });
+
+    // Record transaction in database
+    await transactionModel.create({
+        hash: mintResult.transactionHash,
+        type: 'nft_mint',
+        from_wallet: ownerWallet,
+        to_wallet: config.platform.walletAddress,
+        amount_xrp: '0',
+        status: 'completed',
+        agent_id: id,
+        metadata: JSON.stringify({
+            nftId: mintResult.tokenId,
+            agentName: agent.name
+        })
     });
 
     logger.info('NFT minting confirmed', {
         agentId: id,
-        nftId: nftId,
-        transactionHash: transactionHash,
+        nftId: mintResult.tokenId,
+        transactionHash: mintResult.transactionHash,
         owner: ownerWallet
     });
 
     res.json({
         success: true,
         agent: updatedAgent,
-        message: 'NFT minting confirmed and agent activated'
+        nftId: mintResult.tokenId,
+        transactionHash: mintResult.transactionHash,
+        message: 'NFT minted successfully on XRPL and agent activated'
     });
 }));
 

@@ -25,7 +25,8 @@ CREATE TABLE ai_agents (
     image_url TEXT,
     ipfs_hash TEXT UNIQUE NOT NULL,
     credential_type TEXT UNIQUE NOT NULL,
-    did_document TEXT,
+    did_id TEXT UNIQUE, -- DID ID reference (not the document itself)
+    did_document TEXT, -- Cache of DID document for quick access (optional)
     status TEXT DEFAULT 'active',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     total_sales INTEGER DEFAULT 0,
@@ -130,6 +131,7 @@ CREATE INDEX idx_agents_wallet ON ai_agents(wallet_address);
 CREATE INDEX idx_agents_category ON ai_agents(category);
 CREATE INDEX idx_agents_status ON ai_agents(status);
 CREATE INDEX idx_agents_created ON ai_agents(created_at DESC);
+CREATE INDEX idx_agents_did ON ai_agents(did_id);
 
 -- License queries
 CREATE INDEX idx_licenses_buyer ON licenses(buyer_wallet);

@@ -51,12 +51,34 @@ class WalletAuthService {
                 throw new ValidationError('Invalid wallet address format');
             }
 
-            // Parse challenge
+            // Parse challenge - support both string and JSON format
             let challenge;
-            try {
-                challenge = JSON.parse(challengeString);
-            } catch (error) {
-                throw new ValidationError('Invalid challenge format');
+
+            // Check if challengeString contains "AgentTrust Authentication"
+            if (typeof challengeString === 'string' && challengeString.includes('AgentTrust Authentication')) {
+                // Extract timestamp from the challenge string
+                const timestampMatch = challengeString.match(/AgentTrust Authentication: (\d+)/);
+                if (timestampMatch) {
+                    challenge = {
+                        timestamp: parseInt(timestampMatch[1])
+                    };
+                } else {
+                    // If no timestamp found, use current time (for MVP)
+                    challenge = {
+                        timestamp: Date.now()
+                    };
+                }
+            } else {
+                // Try to parse as JSON for backward compatibility
+                try {
+                    challenge = JSON.parse(challengeString);
+                } catch (error) {
+                    // If not JSON, create a simple challenge object
+                    challenge = {
+                        message: challengeString,
+                        timestamp: Date.now()
+                    };
+                }
             }
 
             // Verify challenge timestamp (valid for 5 minutes)
@@ -226,6 +248,11 @@ class WalletAuthService {
     // Complete wallet authentication flow
     async authenticateWallet(walletAddress, signature, challengeString) {
         try {
+            console.log('=== authenticateWallet called ===');
+            console.log('walletAddress:', walletAddress);
+            console.log('signature:', signature);
+            console.log('challengeString:', challengeString);
+
             // Verify signature
             await this.verifyWalletSignature(walletAddress, signature, challengeString);
 

@@ -6,6 +6,7 @@ const logger = require('../logger');
 const xrplClient = require('./client');
 const platformWallet = require('./platformWallet');
 const dbConnection = require('../../db/connection');
+const credentialsService = require('./credentials');
 const {
     ValidationError,
     XRPLError,
@@ -124,108 +125,248 @@ class TransactionService {
         }
     }
 
-    // Execute batch transaction (sequential payments with rollback capability)
-    async executeBatchTransaction(buyerWallet, sellerWallet, agentData, licenseData) {
+    // Execute escrow-based purchase with automatic fee collection
+    async executeBatchTransaction(buyerWallet, sellerWallet, agentData) {
         const batchHash = this.generateBatchHash();
-        const transactions = [];
 
         try {
             // Calculate fee distribution
-            const fees = this.calculateFeeDistribution(agentData.priceXRP);
+            const priceXRP = agentData.price_xrp || agentData.priceXRP;
+            const fees = this.calculateFeeDistribution(priceXRP);
 
-            // Create transaction records in database first
-            const dbTransactions = await this.createTransactionRecords(
+            logger.logTransaction('escrow_purchase_started', {
                 batchHash,
-                licenseData.licenseId,
-                buyerWallet,
-                sellerWallet,
-                fees
-            );
-
-            logger.logTransaction('batch_started', {
-                batchHash,
-                licenseId: licenseData.licenseId,
                 totalAmount: fees.total,
                 platformFee: fees.platformFee,
-                sellerRevenue: fees.sellerRevenue
+                sellerRevenue: fees.sellerRevenue,
+                useEscrow: true
             });
 
-            // 1. Payment to seller (70%)
-            if (fees.sellerRevenue > 0) {
-                const sellerPayment = await this.createPaymentTransaction(
-                    buyerWallet,
-                    sellerWallet,
-                    fees.sellerRevenue,
-                    `Agent purchase: ${agentData.name}`
-                );
-
-                transactions.push({
-                    type: 'payment_to_seller',
-                    transaction: sellerPayment,
-                    dbId: dbTransactions.find(t => t.type === 'payment_to_seller').transactionId
-                });
-            }
-
-            // 2. Platform fee (30%)
-            if (fees.platformFee > 0) {
-                const platformAddress = platformWallet.getAddress();
-                const platformPayment = await this.createPaymentTransaction(
-                    buyerWallet,
-                    platformAddress,
-                    fees.platformFee,
-                    `Platform fee: ${agentData.name}`
-                );
-
-                transactions.push({
-                    type: 'platform_fee',
-                    transaction: platformPayment,
-                    dbId: dbTransactions.find(t => t.type === 'platform_fee').transactionId
-                });
-            }
-
-            // 3. Credential issuance
-            const credentialTx = await this.createCredentialTransaction(
-                platformWallet.getAddress(),
+            // Create escrow transaction for full amount to platform
+            const escrowTransaction = await this.createEscrowTransaction(
                 buyerWallet,
-                agentData.credentialType,
-                agentData
+                sellerWallet,
+                agentData,
+                fees,
+                batchHash
             );
 
-            transactions.push({
-                type: 'credential_issuance',
-                transaction: credentialTx,
-                dbId: dbTransactions.find(t => t.type === 'credential_issuance').transactionId
-            });
+            // Create simple tracking record for escrow
+            await this.createEscrowRecord(batchHash, buyerWallet, sellerWallet, fees, agentData);
 
-            logger.logTransaction('batch_prepared', {
+            logger.logTransaction('escrow_prepared', {
                 batchHash,
-                transactionCount: transactions.length
+                escrowAmount: fees.total,
+                destinationPlatform: platformWallet.getAddress()
             });
 
-            // Return prepared transactions for client-side signing
+            // Return single escrow transaction for client signing
             return {
                 success: true,
                 batchHash: batchHash,
-                transactions: transactions.map(tx => ({
-                    type: tx.type,
-                    transaction: tx.transaction,
-                    transactionId: tx.dbId
-                })),
-                message: 'Batch transactions prepared for signing and submission'
+                escrowTransaction: escrowTransaction,
+                fees: fees,
+                message: 'Escrow purchase prepared - buyer deposits full amount, platform distributes automatically'
             };
 
         } catch (error) {
-            logger.logError(error, { context: 'executeBatchTransaction', batchHash });
+            logger.logError(error, { context: 'executeEscrowTransaction', batchHash });
+            throw new XRPLError('Failed to execute escrow transaction', error);
+        }
+    }
 
-            // Mark all transactions as failed in database
-            await this.markBatchFailed(batchHash, error.message);
+    // Create escrow transaction for purchase with automatic fee collection
+    async createEscrowTransaction(buyerWallet, sellerWallet, agentData, fees, batchHash) {
+        try {
+            const platformAddress = platformWallet.getAddress();
 
-            throw new XRPLError('Failed to execute batch transaction', error);
+            // Create escrow with full amount going to platform
+            const escrowTx = {
+                TransactionType: 'EscrowCreate',
+                Account: buyerWallet,
+                Destination: platformAddress, // Platform receives the escrow
+                Amount: xrpl.xrpToDrops(fees.total.toString()),
+                FinishAfter: Math.floor(Date.now() / 1000) - 946684800 + 1800, // 30 minutes from now (XRPL epoch)
+                Memos: [{
+                    Memo: {
+                        MemoData: Buffer.from(JSON.stringify({
+                            type: 'agent_purchase_escrow',
+                            batchHash: batchHash,
+                            agentId: agentData.agent_id,
+                            agentName: agentData.name,
+                            sellerWallet: sellerWallet,
+                            sellerAmount: fees.sellerRevenue,
+                            platformAmount: fees.platformFee,
+                            buyerWallet: buyerWallet
+                        }), 'utf8').toString('hex').toUpperCase(),
+                        MemoType: Buffer.from('purchase_escrow', 'utf8').toString('hex').toUpperCase()
+                    }
+                }]
+            };
+
+            // Auto-fill the escrow transaction
+            const client = xrplClient.getClient();
+            const prepared = await client.autofill(escrowTx);
+
+            logger.logTransaction('escrow_created', {
+                buyer: buyerWallet,
+                platform: platformAddress,
+                totalAmount: fees.total,
+                agentId: agentData.agent_id,
+                batchHash: batchHash
+            });
+
+            return prepared;
+
+        } catch (error) {
+            logger.logError(error, { context: 'createEscrowTransaction' });
+            throw new XRPLError('Failed to create escrow transaction', error);
+        }
+    }
+
+    // Create escrow record in database for tracking
+    async createEscrowRecord(batchHash, buyerWallet, sellerWallet, fees, agentData) {
+        try {
+            const escrowId = `escrow_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+
+            const escrowRecord = {
+                sql: `INSERT INTO transactions (
+                    transaction_id, batch_hash, transaction_type,
+                    from_wallet, to_wallet, amount_xrp, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)`,
+                params: [
+                    escrowId,
+                    batchHash,
+                    'escrow_purchase',
+                    buyerWallet,
+                    platformWallet.getAddress(),
+                    fees.total
+                ]
+            };
+
+            await dbConnection.run(escrowRecord.sql, escrowRecord.params);
+
+            logger.logDatabase('escrow_record_created', 'transactions', {
+                escrowId,
+                batchHash,
+                totalAmount: fees.total
+            });
+
+            return escrowId;
+
+        } catch (error) {
+            logger.logError(error, { context: 'createEscrowRecord' });
+            throw new DatabaseError('Failed to create escrow record', error);
+        }
+    }
+
+    // Complete escrow purchase - distribute funds and issue credential
+    async completeEscrowPurchase(escrowDetails, agentData) {
+        try {
+            const { batchHash, buyerWallet, sellerWallet, escrowSequence } = escrowDetails;
+            const fees = this.calculateFeeDistribution(agentData.price_xrp);
+
+            logger.logTransaction('escrow_completion_started', {
+                batchHash,
+                escrowSequence,
+                buyer: buyerWallet,
+                seller: sellerWallet
+            });
+
+            // 1. Finish the escrow (releases funds to platform)
+            const escrowFinishTx = {
+                TransactionType: 'EscrowFinish',
+                Account: platformWallet.getAddress(), // Platform finishes the escrow
+                Owner: buyerWallet,
+                OfferSequence: escrowSequence
+            };
+
+            const client = xrplClient.getClient();
+            const preparedFinish = await client.autofill(escrowFinishTx);
+
+            // Platform automatically signs and submits escrow finish
+            const finishResult = await platformWallet.submitTransaction(preparedFinish);
+
+            if (finishResult.result.meta.TransactionResult !== 'tesSUCCESS') {
+                throw new Error(`Escrow finish failed: ${finishResult.result.meta.TransactionResult}`);
+            }
+
+            logger.logTransaction('escrow_finished', {
+                transactionHash: finishResult.result.hash,
+                platformReceived: fees.total
+            });
+
+            // 2. Distribute seller portion (platform sends 70% to seller)
+            if (fees.sellerRevenue > 0) {
+                const sellerPayment = await platformWallet.createPaymentTransaction(
+                    sellerWallet,
+                    fees.sellerRevenue,
+                    `Seller payment for AI Agent: ${agentData.name}`
+                );
+
+                const sellerResult = await platformWallet.submitTransaction(sellerPayment);
+
+                if (sellerResult.result.meta.TransactionResult !== 'tesSUCCESS') {
+                    throw new Error(`Seller payment failed: ${sellerResult.result.meta.TransactionResult}`);
+                }
+
+                logger.logTransaction('seller_paid', {
+                    transactionHash: sellerResult.result.hash,
+                    seller: sellerWallet,
+                    amount: fees.sellerRevenue
+                });
+            }
+
+            // 3. Issue XRPL Credential to buyer
+            const credential = await credentialsService.createLicenseCredential(
+                platformWallet.getAddress(),
+                buyerWallet,
+                {
+                    agentId: agentData.agent_id,
+                    agentName: agentData.name,
+                    purchaseDate: new Date().toISOString(),
+                    expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+                    transactionHash: finishResult.result.hash
+                }
+            );
+
+            // Platform issues the credential
+            const credentialResult = await platformWallet.submitTransaction(credential.transaction);
+
+            if (credentialResult.result.meta.TransactionResult !== 'tesSUCCESS') {
+                throw new Error(`Credential issuance failed: ${credentialResult.result.meta.TransactionResult}`);
+            }
+
+            logger.logTransaction('credential_issued', {
+                transactionHash: credentialResult.result.hash,
+                credentialId: credential.credentialId,
+                buyer: buyerWallet
+            });
+
+            // 4. Update database records
+            await this.updateTransactionStatus(
+                escrowDetails.transactionId,
+                'completed',
+                finishResult.result.hash
+            );
+
+            return {
+                success: true,
+                escrowFinishHash: finishResult.result.hash,
+                sellerPaymentHash: sellerResult?.result?.hash,
+                credentialIssuanceHash: credentialResult.result.hash,
+                credentialId: credential.credentialId,
+                fees: fees
+            };
+
+        } catch (error) {
+            logger.logError(error, { context: 'completeEscrowPurchase' });
+            throw new XRPLError('Failed to complete escrow purchase', error);
         }
     }
 
     // Create transaction records in database
-    async createTransactionRecords(batchHash, licenseId, buyerWallet, sellerWallet, fees) {
+    async createTransactionRecords(batchHash, buyerWallet, sellerWallet, fees) {
         try {
             const transactions = [];
 
@@ -266,13 +407,12 @@ class TransactionService {
             // Insert all transactions into database
             const insertOperations = transactions.map(tx => ({
                 sql: `INSERT INTO transactions (
-                    transaction_id, batch_hash, license_id, transaction_type,
+                    transaction_id, batch_hash, transaction_type,
                     from_wallet, to_wallet, amount_xrp, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)`,
                 params: [
                     tx.transactionId,
                     batchHash,
-                    licenseId,
                     tx.type,
                     tx.fromWallet,
                     tx.toWallet,
@@ -405,9 +545,10 @@ class TransactionService {
     }
 
     // Simulate batch transaction execution (for testing)
-    async simulateBatchExecution(buyerWallet, sellerWallet, agentData, licenseData) {
+    async simulateBatchExecution(buyerWallet, sellerWallet, agentData) {
         try {
-            const fees = this.calculateFeeDistribution(agentData.priceXRP);
+            const priceXRP = agentData.price_xrp || agentData.priceXRP;
+            const fees = this.calculateFeeDistribution(priceXRP);
 
             // Check buyer has sufficient balance (simulation)
             const requiredAmount = fees.total;

@@ -143,6 +143,7 @@ class AIAgentModel {
                 image_url: agentToCreate.image_url || null,
                 ipfs_hash: agentToCreate.ipfs_hash,
                 credential_type: agentToCreate.credential_type,
+                did_id: agentToCreate.did_id || null,
                 did_document: agentToCreate.did_document || null,
                 status: agentToCreate.status || 'active',
                 created_at: new Date().toISOString(),
@@ -154,9 +155,9 @@ class AIAgentModel {
             await dbConnection.run(
                 `INSERT INTO ai_agents (
                     agent_id, nft_id, wallet_address, name, description, category,
-                    price_xrp, image_url, ipfs_hash, credential_type, did_document,
+                    price_xrp, image_url, ipfs_hash, credential_type, did_id, did_document,
                     status, created_at, total_sales, average_rating
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     completeAgentData.agent_id,
                     completeAgentData.nft_id,
@@ -168,6 +169,7 @@ class AIAgentModel {
                     completeAgentData.image_url,
                     completeAgentData.ipfs_hash,
                     completeAgentData.credential_type,
+                    completeAgentData.did_id,
                     completeAgentData.did_document,
                     completeAgentData.status,
                     completeAgentData.created_at,
@@ -275,6 +277,31 @@ class AIAgentModel {
         }
     }
 
+    // Find agent by DID ID
+    async findByDIDId(didId) {
+        try {
+            if (!didId) {
+                throw new ValidationError('DID ID is required');
+            }
+
+            const agent = await dbConnection.get(
+                'SELECT * FROM ai_agents WHERE did_id = ?',
+                [didId]
+            );
+
+            return agent || null;
+
+        } catch (error) {
+            logger.logError(error, { context: 'AIAgentModel.findByDIDId' });
+
+            if (error.isOperational) {
+                throw error;
+            }
+
+            throw new DatabaseError('Failed to find agent by DID ID', error);
+        }
+    }
+
     // Get agents with pagination and filtering
     async findAll(options = {}) {
         try {
@@ -360,6 +387,30 @@ class AIAgentModel {
     }
 
     // Get agent details with reviews
+    // Get unique sellers (for sync)
+    async getUniqueSellers() {
+        try {
+            const sql = `
+                SELECT DISTINCT wallet_address
+                FROM ${this.tableName}
+                WHERE status IN ('active', 'pending')
+            `;
+
+            const sellers = await dbConnection.all(sql);
+
+            logger.logDatabase('select', this.tableName, {
+                operation: 'getUniqueSellers',
+                count: sellers.length
+            });
+
+            return sellers;
+
+        } catch (error) {
+            logger.logError(error, { context: 'getUniqueSellers' });
+            throw new DatabaseError('Failed to get unique sellers', error);
+        }
+    }
+
     async getAgentDetails(agentId) {
         try {
             const agent = await this.findById(agentId);
@@ -406,7 +457,7 @@ class AIAgentModel {
             }
 
             // Remove immutable fields from update data
-            const { agent_id, nft_id, wallet_address, ipfs_hash, credential_type, created_at, ...allowedUpdates } = updateData;
+            const { agent_id, nft_id, wallet_address, ipfs_hash, credential_type, did_id, created_at, ...allowedUpdates } = updateData;
 
             if (Object.keys(allowedUpdates).length === 0) {
                 throw new ValidationError('No valid fields to update');

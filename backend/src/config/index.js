@@ -9,7 +9,9 @@ const config = {
     xrpl: {
         server: process.env.XRPL_SERVER || 'wss://s.devnet.rippletest.net:51233',
         platformWalletSeed: process.env.PLATFORM_WALLET_SEED || null,
-        network: 'devnet'
+        network: 'devnet',
+        // Disable XRPL Credentials on devnet (not available)
+        credentialsEnabled: process.env.XRPL_CREDENTIALS_ENABLED === 'true' || false
     },
 
     // JWT Configuration

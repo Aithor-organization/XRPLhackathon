@@ -13,8 +13,10 @@ const {
 class LicenseModel {
     constructor() {
         this.tableName = 'licenses';
-        this.requiredFields = ['credential_id', 'agent_id', 'buyer_wallet', 'seller_wallet', 'transaction_hash', 'price_paid'];
-        this.allowedStatuses = ['active', 'expired', 'revoked'];
+        // credential_id와 transaction_hash는 블록체인 트랜잭션 후에만 사용 가능하므로 필수가 아님
+        this.requiredFields = ['agent_id', 'buyer_wallet', 'seller_wallet', 'price_paid'];
+        this.optionalFields = ['credential_id', 'transaction_hash', 'credential_type', 'price_xrp'];
+        this.allowedStatuses = ['pending', 'active', 'expired', 'revoked'];
     }
 
     // Generate unique license ID
@@ -115,16 +117,20 @@ class LicenseModel {
                 expires_at: licenseToCreate.expires_at || this.calculateExpiry(licenseToCreate.purchased_at || new Date().toISOString())
             };
 
-            // Check for duplicate credential ID
-            const existingCredential = await this.findByCredentialId(completeLicenseData.credential_id);
-            if (existingCredential) {
-                throw new ConflictError('License with this credential ID already exists');
+            // Check for duplicate credential ID only if credential_id is provided
+            if (completeLicenseData.credential_id) {
+                const existingCredential = await this.findByCredentialId(completeLicenseData.credential_id);
+                if (existingCredential) {
+                    throw new ConflictError('License with this credential ID already exists');
+                }
             }
 
-            // Check for duplicate transaction hash
-            const existingTransaction = await this.findByTransactionHash(completeLicenseData.transaction_hash);
-            if (existingTransaction) {
-                throw new ConflictError('License with this transaction hash already exists');
+            // Check for duplicate transaction hash only if transaction_hash is provided
+            if (completeLicenseData.transaction_hash) {
+                const existingTransaction = await this.findByTransactionHash(completeLicenseData.transaction_hash);
+                if (existingTransaction) {
+                    throw new ConflictError('License with this transaction hash already exists');
+                }
             }
 
             // Insert license into database
@@ -203,8 +209,9 @@ class LicenseModel {
     // Find license by credential ID
     async findByCredentialId(credentialId) {
         try {
+            // Return null if credentialId is not provided (for optional checks)
             if (!credentialId) {
-                throw new ValidationError('Credential ID is required');
+                return null;
             }
 
             const license = await dbConnection.get(
@@ -228,8 +235,9 @@ class LicenseModel {
     // Find license by transaction hash
     async findByTransactionHash(transactionHash) {
         try {
+            // Return null if transactionHash is not provided (for optional checks)
             if (!transactionHash) {
-                throw new ValidationError('Transaction hash is required');
+                return null;
             }
 
             const license = await dbConnection.get(
@@ -385,6 +393,68 @@ class LicenseModel {
         }
     }
 
+    // 블록체인 트랜잭션 완료 후 credential_id와 transaction_hash 업데이트
+    async updateBlockchainData(licenseId, blockchainData) {
+        try {
+            if (!licenseId) {
+                throw new ValidationError('License ID is required');
+            }
+
+            const updateFields = [];
+            const updateValues = [];
+
+            if (blockchainData.credential_id) {
+                updateFields.push('credential_id = ?');
+                updateValues.push(blockchainData.credential_id);
+            }
+
+            if (blockchainData.transaction_hash) {
+                updateFields.push('transaction_hash = ?');
+                updateValues.push(blockchainData.transaction_hash);
+            }
+
+            if (blockchainData.credential_type) {
+                updateFields.push('credential_type = ?');
+                updateValues.push(blockchainData.credential_type);
+            }
+
+            if (updateFields.length === 0) {
+                throw new ValidationError('No blockchain data to update');
+            }
+
+            // 상태를 active로 변경
+            updateFields.push('status = ?');
+            updateValues.push('active');
+
+            updateValues.push(licenseId);
+
+            const result = await dbConnection.run(
+                `UPDATE licenses SET ${updateFields.join(', ')} WHERE license_id = ?`,
+                updateValues
+            );
+
+            if (result.changes === 0) {
+                throw new NotFoundError('License not found');
+            }
+
+            logger.logDatabase('update_blockchain_data', this.tableName, {
+                licenseId: licenseId,
+                updatedFields: Object.keys(blockchainData)
+            });
+
+            return await this.findById(licenseId);
+
+        } catch (error) {
+            logger.logError(error, { context: 'LicenseModel.updateBlockchainData' });
+
+            if (error.isOperational) {
+                throw error;
+            }
+
+            throw new DatabaseError('Failed to update blockchain data', error);
+        }
+    }
+
     // Update license
     async update(licenseId, updateData) {
         try {
@@ -392,8 +462,8 @@ class LicenseModel {
                 throw new ValidationError('License ID is required');
             }
 
-            // Remove immutable fields from update data
-            const { license_id, credential_id, agent_id, transaction_hash, purchased_at, ...allowedUpdates } = updateData;
+            // Remove immutable fields from update data (but allow credential_id and transaction_hash for blockchain updates)
+            const { license_id, agent_id, purchased_at, ...allowedUpdates } = updateData;
 
             if (Object.keys(allowedUpdates).length === 0) {
                 throw new ValidationError('No valid fields to update');
