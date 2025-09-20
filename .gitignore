@@ -58,10 +58,4 @@ tmp/
 # OS files
 Thumbs.db
 
-# Project specific
-xrpl/
-frontend/
-backend/
-scripts/
-
 CLAUDE.md

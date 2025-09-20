@@ -1,0 +1,471 @@
+openapi: 3.0.0
+info:
+  title: AgentTrust API
+  description: XRPL-based AI Agent License Marketplace API
+  version: 1.0.0
+servers:
+  - url: http://localhost:3001/api
+    description: Development server
+
+paths:
+  /auth/wallet:
+    post:
+      summary: Authenticate wallet
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - walletAddress
+                - signature
+              properties:
+                walletAddress:
+                  type: string
+                  example: "rN7n7otQDd6FczFgLdAtqCSyHFVqKxQQQt"
+                signature:
+                  type: string
+                  description: Signed message proving wallet ownership
+      responses:
+        200:
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: JWT auth token
+                  user:
+                    $ref: '#/components/schemas/User'
+
+  /agents:
+    get:
+      summary: List all AI agents
+      tags:
+        - Marketplace
+      parameters:
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [popular, new, nlp, computer_vision, reinforcement]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            default: 20
+        - in: query
+          name: offset
+          schema:
+            type: integer
+            default: 0
+      responses:
+        200:
+          description: List of AI agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AIAgent'
+                  total:
+                    type: integer
+
+    post:
+      summary: Register new AI agent
+      tags:
+        - Developer
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - description
+                - category
+                - priceXRP
+                - ipfsHash
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                category:
+                  type: string
+                  enum: [NLP, Computer Vision, RL, Other]
+                priceXRP:
+                  type: number
+                  minimum: 0.1
+                ipfsHash:
+                  type: string
+                  pattern: '^Qm[a-zA-Z0-9]{44}$'
+                imageUrl:
+                  type: string
+      responses:
+        201:
+          description: Agent registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIAgent'
+
+  /agents/{agentId}:
+    get:
+      summary: Get AI agent details
+      tags:
+        - Marketplace
+      parameters:
+        - in: path
+          name: agentId
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIAgentDetail'
+
+  /agents/{agentId}/purchase:
+    post:
+      summary: Purchase AI agent license
+      tags:
+        - Marketplace
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: agentId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - buyerWallet
+              properties:
+                buyerWallet:
+                  type: string
+                  description: Buyer's wallet address
+      responses:
+        200:
+          description: Purchase successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  license:
+                    $ref: '#/components/schemas/License'
+                  transactions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+                  downloadToken:
+                    type: string
+
+  /reviews:
+    post:
+      summary: Submit review for purchased agent
+      tags:
+        - Reviews
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - agentId
+                - licenseId
+                - rating
+              properties:
+                agentId:
+                  type: string
+                licenseId:
+                  type: string
+                rating:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                comment:
+                  type: string
+                  maxLength: 500
+      responses:
+        201:
+          description: Review submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  review:
+                    $ref: '#/components/schemas/Review'
+                  repToken:
+                    $ref: '#/components/schemas/REPToken'
+
+  /downloads/{token}:
+    get:
+      summary: Download AI agent with token
+      tags:
+        - Downloads
+      parameters:
+        - in: path
+          name: token
+          required: true
+          schema:
+            type: string
+      responses:
+        200:
+          description: File download
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        403:
+          description: Invalid or expired token
+
+  /downloads/request:
+    post:
+      summary: Request new download token
+      tags:
+        - Downloads
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - licenseId
+              properties:
+                licenseId:
+                  type: string
+      responses:
+        200:
+          description: Download token generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+                  downloadUrl:
+                    type: string
+
+  /users/mypage:
+    get:
+      summary: Get user dashboard data
+      tags:
+        - User
+      security:
+        - bearerAuth: []
+      responses:
+        200:
+          description: User dashboard data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  profile:
+                    $ref: '#/components/schemas/User'
+                  myAgents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AIAgent'
+                  myLicenses:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/License'
+                  salesAnalytics:
+                    type: object
+                    properties:
+                      totalRevenue:
+                        type: number
+                      totalSales:
+                        type: integer
+                      averageRating:
+                        type: number
+                  transactions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        walletAddress:
+          type: string
+        userType:
+          type: string
+          enum: [developer, buyer, both]
+        createdAt:
+          type: string
+          format: date-time
+        totalSales:
+          type: integer
+        totalPurchases:
+          type: integer
+        reputationScore:
+          type: number
+
+    AIAgent:
+      type: object
+      properties:
+        agentId:
+          type: string
+        nftId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        priceXRP:
+          type: number
+        imageUrl:
+          type: string
+        totalSales:
+          type: integer
+        averageRating:
+          type: number
+        createdAt:
+          type: string
+          format: date-time
+
+    AIAgentDetail:
+      allOf:
+        - $ref: '#/components/schemas/AIAgent'
+        - type: object
+          properties:
+            did:
+              type: string
+            credentialType:
+              type: string
+            ownerWallet:
+              type: string
+            reviews:
+              type: array
+              items:
+                $ref: '#/components/schemas/Review'
+
+    License:
+      type: object
+      properties:
+        licenseId:
+          type: string
+        credentialId:
+          type: string
+        agentId:
+          type: string
+        buyerWallet:
+          type: string
+        sellerWallet:
+          type: string
+        pricePaid:
+          type: number
+        purchasedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [active, expired, revoked]
+
+    Transaction:
+      type: object
+      properties:
+        transactionId:
+          type: string
+        batchHash:
+          type: string
+        transactionType:
+          type: string
+          enum: [payment_to_seller, platform_fee, credential_issuance]
+        fromWallet:
+          type: string
+        toWallet:
+          type: string
+        amountXRP:
+          type: number
+        status:
+          type: string
+          enum: [pending, completed, failed, rolled_back]
+        createdAt:
+          type: string
+          format: date-time
+
+    Review:
+      type: object
+      properties:
+        reviewId:
+          type: string
+        agentId:
+          type: string
+        licenseId:
+          type: string
+        reviewerWallet:
+          type: string
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    REPToken:
+      type: object
+      properties:
+        tokenId:
+          type: string
+        nftId:
+          type: string
+        reviewId:
+          type: string
+        ratingValue:
+          type: integer
+        mintedAt:
+          type: string
+          format: date-time
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
