@@ -179,7 +179,7 @@ export const PurchaseModal: React.FC<PurchaseModalProps> = ({
               <div className="info-row">
                 <span>트랜잭션 해시:</span>
                 <span className="hash full-hash">
-                  {transactionResult.hash}
+                  {transactionResult.transactionHash || transactionResult.hash}
                 </span>
               </div>
 

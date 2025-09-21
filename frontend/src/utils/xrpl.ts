@@ -1,5 +1,6 @@
 import { Client, Wallet, Payment, Transaction, NFTokenMint } from 'xrpl'
 import { Product, CredentialInfo } from '../types'
+import { PLATFORM_CONFIG, CredentialType } from '../config/platform'
 
 const XRPL_SERVER = "wss://s.devnet.rippletest.net:51233"
 
@@ -67,27 +68,45 @@ export async function createProductNFT(
   }
 }
 
-// DID Credential 생성
-export async function createCredential(
-  issuerWallet: Wallet,
+// 플랫폼에서 Credential 발급 (플랫폼 마스터 시드 사용)
+export async function createPlatformCredential(
   subjectAddress: string,
-  credentialType: string
+  credentialType: CredentialType,
+  metadata?: any
 ): Promise<{ credentialId: string; transactionResult: any }> {
   const client = new Client(XRPL_SERVER)
   await client.connect()
 
   try {
+    // 플랫폼 마스터 지갑 사용
+    const platformWallet = Wallet.fromSeed(PLATFORM_CONFIG.MASTER_SEED)
+
+    // URI 길이 제한을 위해 간단한 문자열 사용
+    const uriString = `${credentialType}:${subjectAddress.slice(-8)}:${Date.now()}`
+
     const tx: any = {
       TransactionType: "CredentialCreate",
-      Account: issuerWallet.address,
-      Subject: subjectAddress,
+      Account: platformWallet.address,  // 플랫폼이 발급
+      Subject: subjectAddress,           // 대상자에게 부여
       CredentialType: toHex(credentialType),
-      Expiration: now() + 86400, // 24시간 후 만료
-      URI: toHex(`https://example.com/credentials/${credentialType}`)
+      Expiration: now() + PLATFORM_CONFIG.CREDENTIAL_VALIDITY,
+      URI: toHex(uriString) // 간단한 URI (256자 제한)
+    }
+
+    // 메타데이터는 로컬에 저장
+    if (metadata) {
+      const credentialData = {
+        platform: PLATFORM_CONFIG.NAME,
+        type: credentialType,
+        metadata: metadata,
+        timestamp: Date.now(),
+        uri: uriString
+      }
+      localStorage.setItem(`credential_${uriString}`, JSON.stringify(credentialData))
     }
 
     const prepared = await client.autofill(tx)
-    const signed = issuerWallet.sign(prepared)
+    const signed = platformWallet.sign(prepared)
     const result = await client.submitAndWait(signed.tx_blob)
 
     // Credential ID 추출
@@ -103,10 +122,10 @@ export async function createCredential(
   }
 }
 
-// Credential 확인
-export async function checkCredential(
+// 플랫폼 Credential 확인
+export async function checkPlatformCredential(
   address: string,
-  credentialType: string
+  credentialType: CredentialType
 ): Promise<boolean> {
   const client = new Client(XRPL_SERVER)
   await client.connect()
@@ -246,28 +265,39 @@ export async function createRatingToken(
   }
 }
 
-// 직접 결제 (Credential이 있을 때)
-export async function directPayment(
-  buyerWallet: Wallet,
-  sellerAddress: string,
-  amount: string
-): Promise<any> {
+// 플랫폼 계정 상태 확인 (초기화용)
+export async function getPlatformAccountInfo(): Promise<{
+  address: string
+  balance: string
+  isActive: boolean
+}> {
   const client = new Client(XRPL_SERVER)
   await client.connect()
 
   try {
-    const tx: Payment = {
-      TransactionType: "Payment",
-      Account: buyerWallet.address,
-      Destination: sellerAddress,
-      Amount: (parseFloat(amount) * 1000000).toString() // XRP to drops
+    const platformWallet = Wallet.fromSeed(PLATFORM_CONFIG.MASTER_SEED)
+
+    try {
+      const accountInfo = await client.request({
+        command: 'account_info',
+        account: platformWallet.address
+      })
+
+      return {
+        address: platformWallet.address,
+        balance: (Number(accountInfo.result.account_data.Balance) / 1000000).toString(),
+        isActive: true
+      }
+    } catch (error: any) {
+      if (error.data?.error === 'actNotFound') {
+        return {
+          address: platformWallet.address,
+          balance: '0',
+          isActive: false
+        }
+      }
+      throw error
     }
-
-    const prepared = await client.autofill(tx)
-    const signed = buyerWallet.sign(prepared)
-    const result = await client.submitAndWait(signed.tx_blob)
-
-    return result.result
   } finally {
     await client.disconnect()
   }
