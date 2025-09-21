@@ -35,8 +35,8 @@ export const PurchaseModal: React.FC<PurchaseModalProps> = ({
   // 평점을 이미 줬는지 확인
   const hasRated = product.ratings?.some(r => r.buyer === currentWallet)
 
-  // 구매했고 평점도 준 경우 - 다운로드만 가능
-  const isDownloadOnly = hasPurchased && hasRated
+  // 구매한 경우 - 다운로드 가능 (평점 여부와 관계없이)
+  const isDownloadOnly = hasPurchased
 
   const handlePurchase = () => {
     setShowConfirm(false)
@@ -64,7 +64,8 @@ export const PurchaseModal: React.FC<PurchaseModalProps> = ({
 
               <div className="info-box success-info">
                 <p>✅ 구매 완료 상품</p>
-                <p>⭐ 평점 등록 완료</p>
+                {hasRated && <p>⭐ 평점 등록 완료</p>}
+                {!hasRated && <p>💬 평점을 등록해주세요</p>}
               </div>
 
               <div className="detail-row">

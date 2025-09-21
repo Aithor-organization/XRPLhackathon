@@ -197,20 +197,8 @@ function App() {
     setSelectedProduct(product)
     setTransactionResult(null)
 
-    if (hasPurchased) {
-      // 이미 평점을 줬는지 확인
-      const hasRated = product.ratings?.some(r => r.buyer === wallet.address)
-      if (hasRated) {
-        // 평점도 이미 준 경우 - 구매 모달을 다운로드 모드로 표시
-        setShowPurchaseModal(true)
-      } else {
-        // 구매했지만 평점은 아직 안 준 경우
-        setShowRatingModal(true)
-      }
-    } else {
-      // 아직 구매하지 않은 경우
-      setShowPurchaseModal(true)
-    }
+    // 구매 여부와 관계없이 구매/다운로드 모달 표시
+    setShowPurchaseModal(true)
   }
 
   // 상품 구매 처리
